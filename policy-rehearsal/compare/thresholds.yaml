@@ -1,0 +1,6 @@
+operational_lockout_rate: 0.05
+attack_success_rate: 0.01
+alpha: 0.05
+rank_correlation_target: 0.80
+mae_target_percentage_points: 5.0
+sus_benchmark: 68.0

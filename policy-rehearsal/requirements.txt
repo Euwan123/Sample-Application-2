@@ -1,0 +1,10 @@
+numpy
+pandas
+PyYAML
+scipy
+statsmodels
+pytest
+fastapi
+uvicorn
+httpx
+streamlit

@@ -1,0 +1,24 @@
+simulation:
+  days: 7
+  accounts: 1000
+  sensitive_share: 0.10
+  runs: 30
+  replica_runs: 10
+  confidence_level: 0.95
+  seed: 20261027
+users:
+  mistype_rate: 0.10
+  forget_rate: 0.004
+  max_retries: 12
+  mfa_device_at_hand: 0.90
+  recovery_success_rate: 0.90
+  recovery_delay_seconds: 300
+attackers:
+  brute_force:
+    attempt_rate: 2.0
+    accounts_targeted: 1000
+    credential_list_size: 10000
+  credential_stuffing:
+    attempt_rate: 4.0
+    accounts_targeted: 1000
+    credential_list_size: 5000
