@@ -19,6 +19,7 @@ from simulator.model import MEASURES, RATE_MEASURES, TRAFFIC_SCENARIOS, Policy, 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MEASURE_UNITS = {
     "legitimate_lockout_rate": "%",
+    "attacker_caused_lockout_rate": "%",
     "peak_hourly_lockouts": "accounts/hour",
     "legitimate_challenge_rate": "%",
     "avg_added_login_delay_seconds": "seconds",
@@ -74,6 +75,23 @@ def _validate_cells(frame: pd.DataFrame, name: str) -> pd.DataFrame:
         raise ValueError(f"{name} CSV has duplicate policy/traffic cells")
     if not set(frame["traffic"]).issubset(TRAFFIC_SCENARIOS):
         raise ValueError(f"{name} CSV contains an unknown traffic scenario")
+    expected_cells = {
+        (
+            policy.threshold,
+            policy.lockout,
+            policy.fixed_lock_seconds,
+            policy.mfa,
+            policy.recovery,
+            traffic,
+        )
+        for policy in all_policies()
+        for traffic in TRAFFIC_SCENARIOS
+    }
+    actual_cells = set(frame[CELL_COLUMNS].itertuples(index=False, name=None))
+    if len(frame) != 36 or actual_cells != expected_cells:
+        raise ValueError(
+            f"{name} CSV must contain exactly the 36 supported policy/traffic cells"
+        )
     for column in required - set(CELL_COLUMNS):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
         if frame[column].isna().any() or not np.isfinite(frame[column]).all():
@@ -98,14 +116,14 @@ def compare_cells(
     keys = predictions[CELL_COLUMNS].merge(
         observed[CELL_COLUMNS], on=CELL_COLUMNS, how="outer", indicator=True
     )
-    expected_cells = len(all_policies()) * len(TRAFFIC_SCENARIOS)
+    expected_cell_count = 36
     if (
-        len(predictions) != expected_cells
-        or len(observed) != expected_cells
+        len(predictions) != expected_cell_count
+        or len(observed) != expected_cell_count
         or not (keys["_merge"] == "both").all()
     ):
         raise ValueError(
-            f"predictions and observed CSVs must contain the same {expected_cells} policy/traffic cells"
+            "predictions and observed CSVs must contain the same 36 policy/traffic cells"
         )
 
     merged = predictions.merge(
@@ -443,8 +461,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Compare locked simulator predictions with replica observations.")
     parser.add_argument("--predictions", type=Path, default=PROJECT_ROOT / "data" / "predictions.csv")
     parser.add_argument("--lock", type=Path, default=PROJECT_ROOT / "data" / "predictions.lock")
-    parser.add_argument("--observed", type=Path, required=True, help="108-row replica summary CSV.")
-    parser.add_argument("--reviews", type=Path, help="Optional 108-item CSV with five reviewer columns.")
+    parser.add_argument("--observed", type=Path, required=True, help="36-row replica summary CSV.")
+    parser.add_argument("--reviews", type=Path, help="Optional 36-item CSV with five reviewer columns.")
     parser.add_argument("--sus", type=Path, help="Optional 10-respondent SUS CSV.")
     parser.add_argument("--thresholds", type=Path, default=PROJECT_ROOT / "compare" / "thresholds.yaml")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data" / "comparison")

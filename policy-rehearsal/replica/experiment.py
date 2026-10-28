@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import numpy as np
 import pandas as pd
@@ -16,7 +16,6 @@ from simulator.model import (
     TRAFFIC_SCENARIOS,
     Policy,
     all_policies,
-    load_policy,
     load_settings,
 )
 
@@ -40,6 +39,47 @@ class VirtualClock:
         return self.start + timedelta(hours=self.hour, minutes=self.minute)
 
 
+class ReplicaRunner(Protocol):
+    clock: Callable[[], datetime]
+
+    def reset_account_state(self) -> None: ...
+
+    def login(
+        self,
+        account_id: str,
+        password: str,
+        *,
+        actor: str = "legitimate",
+        traffic: str = "normal",
+        run_index: int = 0,
+        virtual_hour: int = 0,
+        now: datetime | None = None,
+        policy_override: Policy | None = None,
+    ) -> dict[str, object]: ...
+
+    def mfa(
+        self,
+        account_id: str,
+        code: str,
+        *,
+        actor: str = "legitimate",
+        traffic: str = "normal",
+        run_index: int = 0,
+        virtual_hour: int = 0,
+    ) -> dict[str, object]: ...
+
+    def recover(
+        self,
+        account_id: str,
+        recovery_code: str,
+        *,
+        actor: str = "legitimate",
+        traffic: str = "normal",
+        run_index: int = 0,
+        virtual_hour: int = 0,
+    ) -> dict[str, object]: ...
+
+
 def _account_id(index: int) -> str:
     return f"acct-{index:05d}"
 
@@ -49,7 +89,7 @@ def _attempts_per_day(rng: np.random.Generator, rate: float) -> int:
 
 
 def run_replica_cell(
-    service: ReplicaService,
+    service: ReplicaRunner,
     policy: Policy,
     traffic: str,
     settings: Any,
@@ -64,6 +104,7 @@ def run_replica_cell(
     clock = service.clock
     lockouts_by_hour = np.zeros(settings.days * 24, dtype=int)
     locked_accounts: set[str] = set()
+    attacker_locked_accounts: set[str] = set()
     legitimate_sessions = 0
     challenged_sessions = 0
     added_delay = 0.0
@@ -96,7 +137,9 @@ def run_replica_cell(
         guesses_by_account[account_id] = guesses
     guess_index = {account_id: 0 for account_id in targeted_accounts}
 
-    def record_lock(account_id: str, virtual_hour: int) -> None:
+    def record_lock(account_id: str, virtual_hour: int, *, actor: str = "legitimate") -> None:
+        if actor == "attacker":
+            attacker_locked_accounts.add(account_id)
         if account_id not in locked_accounts:
             locked_accounts.add(account_id)
             lockouts_by_hour[virtual_hour] += 1
@@ -139,10 +182,13 @@ def run_replica_cell(
                     traffic=traffic,
                     run_index=run_index,
                     virtual_hour=virtual_hour,
+                    now=clock(),
+                    policy_override=policy,
                 )
                 attacker_requests += 1
                 if result["outcome"] == "locked":
-                    record_lock(account_id, virtual_hour)
+                    if result.get("new_lockout"):
+                        record_lock(account_id, virtual_hour, actor="attacker")
                     attacker_finished.add(account_id)
                 elif result["outcome"] == "success":
                     compromised_accounts.add(account_id)
@@ -186,6 +232,8 @@ def run_replica_cell(
                     traffic=traffic,
                     run_index=run_index,
                     virtual_hour=virtual_hour,
+                    now=clock(),
+                    policy_override=policy,
                 )
                 session_delay += float(result["delay"])
                 if result["outcome"] == "locked":
@@ -201,6 +249,8 @@ def run_replica_cell(
                     traffic=traffic,
                     run_index=run_index,
                     virtual_hour=virtual_hour,
+                    now=clock(),
+                    policy_override=policy,
                 )
                 session_delay += float(result["delay"])
                 if result["outcome"] == "locked":
@@ -233,6 +283,7 @@ def run_replica_cell(
     )
     return {
         "legitimate_lockout_rate": len(locked_accounts) / settings.accounts,
+        "attacker_caused_lockout_rate": len(attacker_locked_accounts) / settings.accounts,
         "peak_hourly_lockouts": float(lockouts_by_hour.max(initial=0)),
         "legitimate_challenge_rate": challenged_sessions / max(legitimate_sessions, 1),
         "avg_added_login_delay_seconds": added_delay / max(legitimate_sessions, 1),
@@ -268,8 +319,7 @@ def run_experiments(
         raise FileExistsError(f"refusing to overwrite existing replica log database: {database_path}")
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    configured_policy = load_policy(PROJECT_ROOT / "policies" / "policy.yaml")
-    policies = all_policies(configured_policy.fixed_lock_seconds)
+    policies = all_policies()
     initial_policy = policies[0]
     service = ReplicaService(
         database_path,

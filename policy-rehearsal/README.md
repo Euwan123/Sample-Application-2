@@ -7,11 +7,11 @@ This is a research and teaching model, not production authentication software.
 ## What it does
 
 - Defines one shared policy format for the simulator and FastAPI replica.
-- Simulates 36 combinations of threshold, lockout type, MFA, and recovery under three traffic scenarios (108 cells).
+- Simulates 12 policies across three traffic scenarios (36 cells): three thresholds, two lockout types, and two MFA options. Recovery is fixed to self-service.
 - Uses 30 simulator runs and 10 replica runs per cell by default; change these in `simulator/settings.yaml` or override a run count from the command line.
 - Writes predictions and a SHA-256 lock before comparison. Comparison refuses a changed or mismatched prediction file.
 - Calibrates user settings from 20 volunteers and keeps 10 different volunteers held back for replica replay.
-- Compares prediction and replica means, confidence-interval coverage, policy rankings, issue flags, reviewer answers, and SUS scores.
+- Compares prediction and replica means, confidence-interval coverage, policy rankings, issue flags, reviewer answers, and SUS scores across seven measures.
 - Includes a Streamlit page for running one simulator cell and viewing a replica result when one is available.
 
 ## Project layout
@@ -37,6 +37,7 @@ policy-rehearsal/
   compare/
     thresholds.yaml
     run.py
+    http_check.py
   ui/app.py
   data/                 generated local CSV and SQLite files
   tests/
@@ -67,14 +68,14 @@ The tests use synthetic fixtures and do not require volunteer data or Docker.
 `policies/policy.yaml` is the current policy used by the interactive replica:
 
 ```yaml
-threshold: 5
+threshold: 10
 lockout: fixed
 fixed_lock_seconds: 900
-mfa: sensitive
+mfa: none
 recovery: self_service
 ```
 
-Valid values are thresholds `10`, `5`, or `3`; lockout `fixed` or `progressive`; MFA `none`, `sensitive`, or `all`; and recovery `disabled` or `self_service`. A fixed lock has a configurable `fixed_lock_seconds` duration. The progressive rule allows the threshold number of free failures, then waits 30 seconds, doubling on each further failure up to 3,600 seconds. The experiment now compares 36 policy combinations across three traffic types, producing 108 cells.
+The baseline policy is threshold `10`, fixed lockout of `900` seconds, and no MFA. The experiment compares thresholds `10`, `5`, and `3`; fixed 900-second or progressive lockout; and MFA for no accounts or sensitive accounts. The progressive rule allows the threshold number of free failures, then waits 30 seconds, doubling on each further failure up to 3,600 seconds. Recovery is `self_service` in every experiment policy. This produces 12 policies and 36 policy/traffic cells.
 
 Self-service recovery is synthetic: a sample forgotten-password event succeeds according to `users.recovery_success_rate` and adds `users.recovery_delay_seconds`; the replica's `/recover` endpoint uses a synthetic account-specific recovery code. This is only a local teaching mechanism, not a real password reset flow.
 
@@ -115,12 +116,14 @@ Do **not** upload or use username/password lists, raw credentials, tokens, email
 python -m simulator.run
 ```
 
-This runs all 108 cells using the configured simulator run count and writes:
+This runs all 36 cells using the configured simulator run count and writes:
 
-- `data/predictions.csv` — means and 95% confidence intervals for six measures.
+- `data/predictions.csv` — means and 95% confidence intervals for seven measures.
 - `data/predictions.lock` — SHA-256 digest and expected filename.
 
-You can change `simulation.runs` and `simulation.accounts` in `simulator/settings.yaml`. Optional `--runs` and `--accounts` command-line overrides affect that prediction run only. Treat the locked CSV as fixed after replica runs begin; if it is changed, comparison will stop rather than silently compare against a different prediction.
+The command prints the SHA-256 hash and the Git commands to commit both files. Commit the locked predictions before starting replica runs. You can change `simulation.runs` and `simulation.accounts` in `simulator/settings.yaml`. Optional `--runs` and `--accounts` command-line overrides affect that prediction run only. Treat the locked CSV as fixed after replica runs begin; if it is changed, comparison will stop rather than silently compare against a different prediction.
+
+The shared `legitimate_lockout_rate` measure is the share of the 1,000 legitimate accounts locked at least once during the seven-day experiment, whether the lock was caused by the owner's mistakes or by attacker traffic. `attacker_caused_lockout_rate` reports the share locked by an attacker separately.
 
 ## Run the replica
 
@@ -142,7 +145,7 @@ Stop the service with:
 docker compose down
 ```
 
-### Produce the 108-cell replica observations
+### Produce the 36-cell replica observations
 
 After calibration has generated `data/heldout_sessions.csv`, run:
 
@@ -150,9 +153,25 @@ After calibration has generated `data/heldout_sessions.csv`, run:
 python -m replica.experiment
 ```
 
-The runner replays held-out sessions resampled across the configured synthetic accounts, adds the selected synthetic attack traffic, and advances a virtual clock through the configured seven days. It uses the same `ReplicaService` enforcement logic in-process so time can be advanced quickly; it does not send the bulk experiment through Docker's HTTP endpoint. It batch-writes every request result to a timestamped SQLite database and writes the per-cell means to `data/observed.csv`.
+The runner replays held-out sessions resampled across the configured synthetic accounts, adds the selected synthetic attack traffic, and advances a virtual clock through the configured seven days. It uses the same `ReplicaService` enforcement logic in-process so time can be advanced quickly; it does not send the bulk experiment through Docker's HTTP endpoint. It batch-writes every request result to a timestamped SQLite database and writes the per-cell means for all seven measures to `data/observed.csv`. Its `legitimate_lockout_rate` counts each legitimate account locked at least once, whether the cause was the owner's mistakes or attacker traffic; `attacker_caused_lockout_rate` reports attacker-triggered lockouts separately.
 
 Use `--runs 1` for a quick local check. The default comes from `simulation.replica_runs`; an override is recorded in `observed.csv` and accepted by the comparison step. The runner refuses to overwrite an existing SQLite log database.
+
+### Check the Docker HTTP service
+
+Start the local service before the check:
+
+```powershell
+docker compose up --build -d
+```
+
+Then run:
+
+```powershell
+python -m compare.http_check
+```
+
+The check evaluates six cells from two policies across all three traffic scenarios. It uses the same seeds and virtual timestamps as the in-process replica path, sends login, MFA, and recovery requests to the Docker service over HTTP, and writes side-by-side rate results to `data/http_check.csv`. A difference greater than one percentage point is flagged and makes the command fail. The target guard accepts only localhost or the local `replica` container on port 8000. `--runs` can override the number of runs per sampled cell.
 
 ### Synthetic traffic scripts
 
@@ -174,12 +193,12 @@ Generate predictions before replica runs, then generate observations. To create 
 python -m compare.run --observed .\data\observed.csv
 ```
 
-The comparison command verifies `predictions.lock` before reading the results. It requires the same 108 policy/traffic cells in both files and uses the actual run counts recorded in the CSVs. It writes these files under `data/comparison/`:
+The comparison command verifies `predictions.lock` before reading the results. It requires exactly the same 36 supported policy/traffic cells in both files and uses the actual run counts recorded in the CSVs. It writes these files under `data/comparison/`:
 
 - `cell_comparison.csv` — predicted and observed mean, signed/absolute error, confidence interval, and run counts per measure and cell.
 - `metric_summary.csv` — MAE, RMSE, 95% interval coverage, and paired Wilcoxon signed-rank results per measure. Rate errors are reported in percentage points; the 5-point target applies to rate measures.
 - `policy_rankings.csv` — policy scores and simulator/replica ranks. The score sums lockout and attack-success rates across the three traffic conditions; higher scores indicate more risk.
-- `issue_flags.csv` — 108 items: one normal-traffic operational flag and two attack-scenario security flags per policy.
+- `issue_flags.csv` — 36 items: one normal-traffic operational flag and two attack-scenario security flags per policy.
 - `review_template.csv` — item IDs and five blank reviewer columns for manual review.
 - `summary.json` — machine-readable summary including rank correlation and any optional review/SUS results.
 
@@ -217,6 +236,40 @@ If you need to recreate the shortcut, create a Windows shortcut pointing to `Lau
 python -m streamlit run ui\app.py --server.address 127.0.0.1
 ```
 
-Choose a threshold, lockout type and duration, MFA scope, recovery rule, and traffic condition, then run a prediction. The page uses the configured simulator run count and shows plain-language lockout, attack, challenge, recovery delay, and issue-flag results. If a matching row exists in `data/observed.csv`, it also charts predicted vs. replica rates.
+Choose a threshold, lockout type, MFA scope, and traffic condition, then run a prediction. Fixed lockout is 900 seconds, and recovery is always self-service. The page uses the configured simulator run count and shows lockout, attacker-caused lockout, attack, challenge, recovery delay, and issue-flag results. If a matching row exists in `data/observed.csv`, it also charts predicted vs. replica rates.
 
 The sidebar also lets you calibrate with an anonymized session-summary CSV or the built-in synthetic sample. The fitted values apply to predictions in the current app session. Select **Also save fitted settings and anonymized holdout for replica use** to explicitly update `simulator/settings.yaml` and create `data/heldout_sessions.csv`.
+
+## Run order
+
+Run these commands from the `policy-rehearsal` directory. First create the held-out sessions using the synthetic sample or a local volunteer session-summary CSV. Start Docker before the HTTP check.
+
+```powershell
+# 1. Calibrate settings and create held-out sessions
+python -m simulator.calibrate --input .\data\sample_login_sessions.csv
+
+# 2. Generate simulator predictions
+python -m simulator.run
+
+# 3. Commit the prediction lock before any replica experiment
+git add data/predictions.csv data/predictions.lock
+git commit -m "Lock predictions"
+
+# 4. Generate the in-process replica observations
+python -m replica.experiment
+
+# 5. Start the Docker service and compare the sample cells over HTTP
+docker compose up --build -d
+python -m compare.http_check
+
+# 6. Compare predictions with replica observations
+python -m compare.run --observed .\data\observed.csv
+
+# 7. Start the Streamlit interface
+python -m streamlit run ui\app.py --server.address 127.0.0.1
+```
+
+## Known differences
+
+- The replica experiment uses a virtual clock, so its seven simulated days are not waited out in real time.
+- Simulator attack success is estimated with a probability formula. The replica issues individual synthetic password-guess requests, so their attack-success mechanisms differ.

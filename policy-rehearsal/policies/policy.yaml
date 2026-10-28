@@ -1,5 +1,5 @@
-threshold: 5
+threshold: 10
 lockout: fixed
 fixed_lock_seconds: 900
-mfa: sensitive
+mfa: none
 recovery: self_service

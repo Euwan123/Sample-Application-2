@@ -256,14 +256,19 @@ class ReplicaService:
         traffic: str = "normal",
         run_index: int = 0,
         virtual_hour: int = 0,
+        now: datetime | None = None,
+        policy_override: Policy | None = None,
     ) -> dict[str, object]:
+        active_policy = policy_override or self.policy
+
         def record(
             outcome: str,
             delay: float = 0.0,
             locked: bool = False,
             mfa_challenged: bool = False,
+            new_lockout: bool = False,
         ) -> dict[str, object]:
-            return self._log(
+            result = self._log(
                 account_id,
                 outcome,
                 delay,
@@ -271,18 +276,21 @@ class ReplicaService:
                 mfa_challenged,
                 actor=actor,
                 traffic=traffic,
+                policy_label=active_policy.label,
                 run_index=run_index,
                 virtual_hour=virtual_hour,
             )
+            result["new_lockout"] = new_lockout
+            return result
 
-        now = self.clock().astimezone(timezone.utc)
+        current_time = (now or self.clock()).astimezone(timezone.utc)
         if self._memory_accounts is not None:
             account = self._memory_accounts.get(account_id)
             if account is None:
                 return record("unknown_account")
             locked_until = account["locked_until"]
             if isinstance(locked_until, datetime):
-                remaining = max(0.0, (locked_until - now).total_seconds())
+                remaining = max(0.0, (locked_until - current_time).total_seconds())
                 if remaining > 0:
                     return record("locked", remaining, locked=True)
                 account["locked_until"] = None
@@ -293,20 +301,21 @@ class ReplicaService:
                 str(account["password_digest"]),
             ):
                 failures = int(account["failure_count"]) + 1
-                wait_seconds = self.policy.lockout_seconds(failures)
+                wait_seconds = active_policy.lockout_seconds(failures)
                 account["failure_count"] = failures
                 account["locked_until"] = (
-                    now + timedelta(seconds=wait_seconds) if wait_seconds else None
+                    current_time + timedelta(seconds=wait_seconds) if wait_seconds else None
                 )
                 return record(
                     "locked" if wait_seconds else "bad_credentials",
                     float(wait_seconds),
                     locked=bool(wait_seconds),
+                    new_lockout=bool(wait_seconds),
                 )
             account["failure_count"] = 0
             account["locked_until"] = None
-            requires_mfa = self.policy.mfa == "all" or (
-                self.policy.mfa == "sensitive" and bool(account["sensitive"])
+            requires_mfa = active_policy.mfa == "all" or (
+                active_policy.mfa == "sensitive" and bool(account["sensitive"])
             )
             if requires_mfa:
                 account["mfa_pending"] = True
@@ -328,7 +337,7 @@ class ReplicaService:
 
             if account["locked_until"]:
                 locked_until = datetime.fromisoformat(account["locked_until"])
-                remaining = max(0.0, (locked_until - now).total_seconds())
+                remaining = max(0.0, (locked_until - current_time).total_seconds())
                 if remaining > 0:
                     connection.commit()
                     return record("locked", remaining, locked=True)
@@ -343,9 +352,9 @@ class ReplicaService:
             actual = self._password_digest(password, pepper)
             if not hmac.compare_digest(actual, expected):
                 failures = account["failure_count"] + 1
-                wait_seconds = self.policy.lockout_seconds(failures)
+                wait_seconds = active_policy.lockout_seconds(failures)
                 locked_until = (
-                    (now + timedelta(seconds=wait_seconds)).isoformat() if wait_seconds else None
+                    (current_time + timedelta(seconds=wait_seconds)).isoformat() if wait_seconds else None
                 )
                 connection.execute(
                     """
@@ -360,14 +369,15 @@ class ReplicaService:
                     "locked" if wait_seconds else "bad_credentials",
                     float(wait_seconds),
                     locked=bool(wait_seconds),
+                    new_lockout=bool(wait_seconds),
                 )
 
             connection.execute(
                 "UPDATE accounts SET failure_count = 0, locked_until = NULL WHERE account_id = ?",
                 (account_id,),
             )
-            requires_mfa = self.policy.mfa == "all" or (
-                self.policy.mfa == "sensitive" and account["sensitive"]
+            requires_mfa = active_policy.mfa == "all" or (
+                active_policy.mfa == "sensitive" and account["sensitive"]
             )
             if requires_mfa:
                 connection.execute(

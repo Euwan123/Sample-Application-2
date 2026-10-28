@@ -18,8 +18,8 @@ from simulator.calibrate import (
     split_volunteers,
 )
 from simulator.model import (
-    MFA_MODES,
-    RECOVERY_MODES,
+    EXPERIMENT_MFA_MODES,
+    FIXED_LOCK_SECONDS,
     RATE_MEASURES,
     TRAFFIC_SCENARIOS,
     Policy,
@@ -100,6 +100,7 @@ def _replica_cell(policy: Policy, traffic: str) -> pd.Series | None:
         "traffic",
         *(
             "legitimate_lockout_rate",
+            "attacker_caused_lockout_rate",
             "legitimate_challenge_rate",
             "attack_success_rate",
             "peak_hourly_lockouts",
@@ -161,33 +162,13 @@ def main() -> None:
                 "Lock for 15 minutes" if value == "fixed" else "Wait gets longer after each failure"
             ),
         )
-        fixed_lock_seconds = st.selectbox(
-            "Fixed lock duration",
-            options=[300, 900, 1800, 3600],
-            format_func=lambda value: f"{value // 60} minutes",
-            index=(
-                [300, 900, 1800, 3600].index(current_policy.fixed_lock_seconds)
-                if current_policy.fixed_lock_seconds in [300, 900, 1800, 3600]
-                else 1
-            ),
-        )
         mfa = st.selectbox(
             "Second factor",
-            options=list(MFA_MODES),
-            index=list(MFA_MODES).index(current_policy.mfa),
+            options=list(EXPERIMENT_MFA_MODES),
+            index=list(EXPERIMENT_MFA_MODES).index(current_policy.mfa),
             format_func=lambda value: {
                 "none": "Off",
                 "sensitive": "Sensitive accounts",
-                "all": "All accounts",
-            }[value],
-        )
-        recovery = st.selectbox(
-            "Forgotten-password recovery",
-            options=list(RECOVERY_MODES),
-            index=list(RECOVERY_MODES).index(current_policy.recovery),
-            format_func=lambda value: {
-                "disabled": "Disabled",
-                "self_service": "Self-service recovery",
             }[value],
         )
         traffic = st.selectbox(
@@ -260,8 +241,8 @@ def main() -> None:
         threshold=threshold,
         lockout=lockout,
         mfa=mfa,
-        fixed_lock_seconds=fixed_lock_seconds,
-        recovery=recovery,
+        fixed_lock_seconds=FIXED_LOCK_SECONDS,
+        recovery="self_service",
     )
     if run_button:
         st.session_state["selected_policy"] = policy
@@ -294,22 +275,25 @@ def main() -> None:
     security_issue = attack_success > float(thresholds["attack_success_rate"])
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Users locked out at least once", f"{lockouts * 100:.1f}%")
+    attacker_lockouts = prediction["attacker_caused_lockout_rate"]["mean"]
+    col1.metric("Accounts locked at least once, any cause", f"{lockouts * 100:.1f}%")
     if selected_traffic == "normal":
         attack_label = "No attack traffic"
     elif attack_success == 0:
         attack_label = "0 observed (below display precision)"
     else:
         attack_label = f"{attack_success * 100:.3f}%"
-    col2.metric("Targeted accounts broken into", attack_label)
-    col3.metric("Added login delay", f"{delay:.1f} seconds")
+    col2.metric("Accounts locked by attackers", f"{attacker_lockouts * 100:.1f}%")
+    col3.metric("Targeted accounts broken into", attack_label)
+    st.metric("Added login delay", f"{delay:.1f} seconds")
 
     lockout_ci = prediction["legitimate_lockout_rate"]
     attack_ci = prediction["attack_success_rate"]
     challenge_ci = prediction["legitimate_challenge_rate"]
     st.write(
         f"Across {settings.runs} runs, the estimate is that **{lockouts * 100:.1f}%** of users "
-        f"may be locked out at least once (95% range {lockout_ci['ci_low'] * 100:.1f}%–"
+        f"may be locked out at least once by their own mistakes or attacker traffic "
+        f"(95% range {lockout_ci['ci_low'] * 100:.1f}%–"
         f"{lockout_ci['ci_high'] * 100:.1f}%). "
         f"The simulator predicts MFA for **{challenges * 100:.1f}%** of legitimate logins "
         f"(95% range {challenge_ci['ci_low'] * 100:.1f}%–{challenge_ci['ci_high'] * 100:.1f}%)."
@@ -350,7 +334,7 @@ def main() -> None:
             )
         st.subheader("Predicted vs. replica")
         st.bar_chart(pd.DataFrame(chart_rows).set_index("Measure"))
-        with st.expander("See all six measures"):
+        with st.expander("See all seven measures"):
             comparison = []
             for measure in prediction:
                 comparison.append(

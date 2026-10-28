@@ -11,11 +11,14 @@ import yaml
 
 LOCKOUT_TYPES = ("fixed", "progressive")
 MFA_MODES = ("none", "sensitive", "all")
+EXPERIMENT_MFA_MODES = ("none", "sensitive")
 RECOVERY_MODES = ("disabled", "self_service")
 THRESHOLDS = (10, 5, 3)
+FIXED_LOCK_SECONDS = 900
 TRAFFIC_SCENARIOS = ("normal", "brute_force", "credential_stuffing")
 MEASURES = (
     "legitimate_lockout_rate",
+    "attacker_caused_lockout_rate",
     "peak_hourly_lockouts",
     "legitimate_challenge_rate",
     "avg_added_login_delay_seconds",
@@ -24,6 +27,7 @@ MEASURES = (
 )
 RATE_MEASURES = {
     "legitimate_lockout_rate",
+    "attacker_caused_lockout_rate",
     "legitimate_challenge_rate",
     "attack_success_rate",
 }
@@ -35,7 +39,7 @@ class Policy:
     lockout: str
     mfa: str
     fixed_lock_seconds: int = 900
-    recovery: str = "disabled"
+    recovery: str = "self_service"
 
     def __post_init__(self) -> None:
         if self.threshold not in THRESHOLDS:
@@ -157,11 +161,11 @@ def load_settings(path: Path) -> SimulationSettings:
     return settings
 
 
-def all_policies(fixed_lock_seconds: int = 900) -> list[Policy]:
+def all_policies() -> list[Policy]:
     return [
-        Policy(threshold, lockout, mfa, fixed_lock_seconds, recovery)
-        for threshold, lockout, mfa, recovery in product(
-            THRESHOLDS, LOCKOUT_TYPES, MFA_MODES, RECOVERY_MODES
+        Policy(threshold, lockout, mfa, FIXED_LOCK_SECONDS, "self_service")
+        for threshold, lockout, mfa in product(
+            THRESHOLDS, LOCKOUT_TYPES, EXPERIMENT_MFA_MODES
         )
     ]
 
@@ -179,7 +183,8 @@ def simulate(
     accounts = settings.accounts
     sensitive_count = round(accounts * settings.sensitive_share)
     sensitive = np.arange(accounts) < sensitive_count
-    lockout_seen = np.zeros(accounts, dtype=bool)
+    legitimate_lockout_seen = np.zeros(accounts, dtype=bool)
+    attacker_lockout_seen = np.zeros(accounts, dtype=bool)
     hourly_lockouts = np.zeros(settings.days * 24, dtype=int)
     legit_login_count = 0
     challenged_count = 0
@@ -215,18 +220,19 @@ def simulate(
             wait_seconds = policy.lockout_seconds(failures)
             if wait_seconds:
                 added_delay += wait_seconds
-                if not lockout_seen[account]:
-                    lockout_seen[account] = True
+                if not legitimate_lockout_seen[account]:
+                    legitimate_lockout_seen[account] = True
                     hourly_lockouts[hour] += 1
 
     if traffic == "normal":
         targeted = 0
         attacker_attempts = 0.0
-        compromised = 0
+        compromised_by_account = np.zeros(0, dtype=bool)
     else:
         is_brute = traffic == "brute_force"
         target_limit = settings.brute_accounts_targeted if is_brute else settings.stuffing_accounts_targeted
         targeted = min(accounts, target_limit)
+        target_indexes = rng.choice(accounts, size=targeted, replace=False)
         rate = settings.brute_attempt_rate if is_brute else settings.stuffing_attempt_rate
         list_size = settings.brute_credential_list_size if is_brute else settings.stuffing_credential_list_size
         attacker_attempts = rate * targeted * settings.days
@@ -241,13 +247,31 @@ def simulate(
             else 0.0
         )
         mfa_factor = 1.0 - protected_share * (1.0 - 0.03)
-        compromised = int(np.count_nonzero(rng.random(targeted) < guess_probability * policy_factor * mfa_factor))
+        compromised_by_account = (
+            rng.random(targeted) < guess_probability * policy_factor * mfa_factor
+        )
+        attempt_counts = rng.poisson(rate * settings.days, size=targeted)
+        lockout_attempts = (
+            policy.threshold
+            if policy.lockout == "fixed"
+            else policy.threshold + 1
+        )
+        attacker_lockout_seen[target_indexes] = (
+            (attempt_counts >= lockout_attempts) & ~compromised_by_account
+        )
+        new_attacker_lockouts = attacker_lockout_seen & ~legitimate_lockout_seen
+        for account in np.flatnonzero(new_attacker_lockouts):
+            hour = int(rng.integers(0, settings.days * 24))
+            hourly_lockouts[hour] += 1
 
     return {
-        "legitimate_lockout_rate": float(lockout_seen.sum() / accounts),
+        "legitimate_lockout_rate": float(
+            np.count_nonzero(legitimate_lockout_seen | attacker_lockout_seen) / accounts
+        ),
+        "attacker_caused_lockout_rate": float(attacker_lockout_seen.sum() / accounts),
         "peak_hourly_lockouts": float(hourly_lockouts.max(initial=0)),
         "legitimate_challenge_rate": float(challenged_count / max(legit_login_count, 1)),
         "avg_added_login_delay_seconds": float(added_delay / max(legit_login_count, 1)),
-        "attack_success_rate": float(compromised / max(targeted, 1)),
+        "attack_success_rate": float(compromised_by_account.sum() / max(targeted, 1)),
         "attack_throughput_per_hour": float(attacker_attempts / (settings.days * 24)),
     }

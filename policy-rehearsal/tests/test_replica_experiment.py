@@ -7,7 +7,7 @@ from replica.experiment import run_experiments
 from simulator.model import MEASURES
 
 
-def test_experiment_writes_108_observation_cells_and_sqlite_request_log(tmp_path: Path):
+def test_experiment_writes_36_observation_cells_and_sqlite_request_log(tmp_path: Path):
     settings_path = tmp_path / "settings.yaml"
     settings_path.write_text(
         """
@@ -61,12 +61,13 @@ attackers:
     )
 
     assert written_database == database_path
-    assert len(frame) == 108
-    assert frame["policy"].nunique() == 36
+    assert len(frame) == 36
+    assert frame["policy"].nunique() == 12
     assert set(MEASURES).issubset(frame.columns)
+    assert frame["attacker_caused_lockout_rate"].between(0, 1).all()
     assert set(frame["runs"]) == {1}
     saved = pd.read_csv(output_path)
-    assert len(saved) == 108
+    assert len(saved) == 36
     with sqlite3.connect(database_path) as connection:
         logged_requests = connection.execute("SELECT COUNT(*) FROM request_log").fetchone()[0]
         columns = {row[1] for row in connection.execute("PRAGMA table_info(request_log)")}

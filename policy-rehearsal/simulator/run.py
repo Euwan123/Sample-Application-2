@@ -93,16 +93,19 @@ def main() -> None:
     parser.add_argument("--accounts", type=int, help="Override the configured synthetic account count.")
     args = parser.parse_args()
 
-    configured_policy = load_policy(args.policy)
     frame = build_predictions(
-        all_policies(configured_policy.fixed_lock_seconds),
+        all_policies(),
         args.settings,
         args.policy,
         args.runs,
         args.accounts,
     )
     digest = write_locked_predictions(frame, args.output)
-    print(f"Wrote {len(frame)} prediction cells; SHA-256 locked as {digest}.")
+    print(f"Wrote {len(frame)} prediction cells.")
+    print(f"SHA-256: {digest}")
+    print("Commit both prediction files before running the replica experiment:")
+    print("  git add data/predictions.csv data/predictions.lock")
+    print('  git commit -m "Lock predictions"')
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ def prediction_and_observation_frames():
             for measure_index, measure in enumerate(MEASURES):
                 mean = 0.02 if measure in {
                     "legitimate_lockout_rate",
+                    "attacker_caused_lockout_rate",
                     "legitimate_challenge_rate",
                     "attack_success_rate",
                 } else float(measure_index + 1)
@@ -76,10 +77,19 @@ def test_comparison_outputs_per_measure_per_cell_and_percentage_point_mae():
     predictions, observed = prediction_and_observation_frames()
     cells = compare_cells(predictions, observed, expected_runs=10)
 
-    assert len(cells) == 108 * len(MEASURES)
+    assert len(cells) == 36 * len(MEASURES)
     lockout = cells[cells["measure"] == "legitimate_lockout_rate"]
     assert lockout.iloc[0]["unit"] == "%"
     assert lockout.iloc[0]["absolute_error"] == pytest.approx(1.0)
+    attacker_lockout = cells[cells["measure"] == "attacker_caused_lockout_rate"]
+    assert attacker_lockout.iloc[0]["unit"] == "%"
+
+
+def test_comparison_requires_exact_supported_36_cells():
+    predictions, observed = prediction_and_observation_frames()
+
+    with pytest.raises(ValueError, match="exactly the 36 supported"):
+        compare_cells(predictions.iloc[:-1], observed)
 
 
 def test_summary_computes_error_ci_coverage_and_wilcoxon():
@@ -105,7 +115,7 @@ def test_issue_review_majority_detection_rates_and_exact_mcnemar():
     predictions, observed = prediction_and_observation_frames()
     thresholds = {"operational_lockout_rate": 0.05, "attack_success_rate": 0.01}
     items = build_issue_items(predictions, observed, thresholds)
-    assert len(items) == 108
+    assert len(items) == 36
 
     reviews = pd.DataFrame(
         [
@@ -118,7 +128,7 @@ def test_issue_review_majority_detection_rates_and_exact_mcnemar():
     )
     scored, metrics, mcnemar = compare_reviewers(items, reviews)
 
-    assert len(scored) == 108
+    assert len(scored) == 36
     assert len(metrics) == 2
     assert mcnemar["discordant_items"] >= 0
     assert 0 <= mcnemar["exact_mcnemar_p_value"] <= 1
@@ -174,9 +184,9 @@ def test_full_comparison_writes_outputs_and_checks_locked_prediction_hash(tmp_pa
         sus_path,
     )
 
-    assert result["issue_flags"] == 108
+    assert result["issue_flags"] == 36
     assert result["exact_mcnemar"]["discordant_items"] >= 0
     assert result["sus"]["respondents"] == 10
     assert result["policy_ranking"]["spearman_rank_correlation"] == pytest.approx(1.0)
     assert (tmp_path / "out" / "summary.json").is_file()
-    assert len(pd.read_csv(tmp_path / "out" / "cell_comparison.csv")) == 108 * len(MEASURES)
+    assert len(pd.read_csv(tmp_path / "out" / "cell_comparison.csv")) == 36 * len(MEASURES)
